@@ -1,4 +1,8 @@
-"""Analytical SQL queries for the DVF SQLite database."""
+"""SQL analytics: volumes use operations; price statistics use price_transactions.
+
+In price queries transaction_count always denotes the eligible price sample,
+not the full volume of residential operations. Means are unweighted ratios.
+"""
 
 from __future__ import annotations
 
@@ -72,7 +76,7 @@ def avg_price_by_dept(conn: sqlite3.Connection) -> pd.DataFrame:
             code_departement,
             COUNT(*) AS transaction_count,
             ROUND(AVG(price_per_m2), 2) AS avg_price_per_m2
-        FROM transactions
+        FROM price_transactions
         GROUP BY code_departement
         HAVING COUNT(*) >= 100
         ORDER BY avg_price_per_m2 DESC, code_departement
@@ -81,18 +85,15 @@ def avg_price_by_dept(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def monthly_volume(conn: sqlite3.Connection) -> pd.DataFrame:
-    """Return monthly transaction counts sorted chronologically."""
+    """Compter les ventes distinctes par mois."""
 
-    _ensure_sqlite_functions(conn)
     query = """
-        SELECT
-            year,
-            month,
-            COUNT(*) AS transaction_count
-        FROM transactions
+        SELECT year, month, COUNT(*) AS transaction_count
+        FROM operations
         GROUP BY year, month
         ORDER BY year, month
     """
+
     return pd.read_sql_query(query, conn)
 
 
@@ -103,12 +104,13 @@ def price_distribution_by_type(conn: sqlite3.Connection) -> pd.DataFrame:
     query = """
         SELECT
             type_local,
+            COUNT(*) AS transaction_count,
             ROUND(MIN(price_per_m2), 2) AS min_price_per_m2,
             ROUND(MAX(price_per_m2), 2) AS max_price_per_m2,
             ROUND(AVG(price_per_m2), 2) AS mean_price_per_m2,
             ROUND(median(price_per_m2), 2) AS median_price_per_m2,
             ROUND(stddev(price_per_m2), 2) AS stddev_price_per_m2
-        FROM transactions
+        FROM price_transactions
         GROUP BY type_local
         ORDER BY type_local
     """
@@ -124,8 +126,9 @@ def top10_expensive_depts(conn: sqlite3.Connection) -> pd.DataFrame:
             code_departement,
             COUNT(*) AS transaction_count,
             ROUND(median(price_per_m2), 2) AS median_price_per_m2
-        FROM transactions
+        FROM price_transactions
         GROUP BY code_departement
+        HAVING COUNT(*) >= 100
         ORDER BY median_price_per_m2 DESC, transaction_count DESC
         LIMIT 10
     """
@@ -153,7 +156,7 @@ def price_vs_surface_buckets(conn: sqlite3.Connection) -> pd.DataFrame:
                     WHEN surface_reelle_bati < 120 THEN '80-120'
                     ELSE '120+'
                 END AS surface_bucket
-            FROM transactions
+            FROM price_transactions
         )
         GROUP BY surface_bucket, type_local
         ORDER BY
@@ -170,11 +173,13 @@ def price_vs_surface_buckets(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def yoy_comparison(conn: sqlite3.Connection) -> pd.DataFrame:
-    """Return yearly or monthly average price per square meter by property type."""
+    """Return eligible-price sample counts and means, yearly or monthly by type.
+
+    With a single year this is seasonality, not a year-over-year comparison."""
 
     _ensure_sqlite_functions(conn)
     distinct_years = pd.read_sql_query(
-        "SELECT COUNT(DISTINCT year) AS year_count FROM transactions",
+        "SELECT COUNT(DISTINCT year) AS year_count FROM price_transactions",
         conn,
     )["year_count"].iloc[0]
 
@@ -185,7 +190,7 @@ def yoy_comparison(conn: sqlite3.Connection) -> pd.DataFrame:
                 type_local,
                 COUNT(*) AS transaction_count,
                 ROUND(AVG(price_per_m2), 2) AS avg_price_per_m2
-            FROM transactions
+            FROM price_transactions
             GROUP BY year, type_local
             ORDER BY year, type_local
         """
@@ -197,7 +202,7 @@ def yoy_comparison(conn: sqlite3.Connection) -> pd.DataFrame:
                 type_local,
                 COUNT(*) AS transaction_count,
                 ROUND(AVG(price_per_m2), 2) AS avg_price_per_m2
-            FROM transactions
+            FROM price_transactions
             GROUP BY year, month, type_local
             ORDER BY year, month, type_local
         """
@@ -206,26 +211,17 @@ def yoy_comparison(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def dept_transaction_share(conn: sqlite3.Connection) -> pd.DataFrame:
-    """Return each department's share of total transaction volume."""
+    """Calculer la part des ventes distinctes par département."""
 
-    _ensure_sqlite_functions(conn)
     query = """
-        SELECT
-            code_departement,
-            transaction_count,
-            ROUND(
-                100.0 * transaction_count / SUM(transaction_count) OVER (),
-                2
-            ) AS transaction_share_pct
-        FROM (
-            SELECT
-                code_departement,
-                COUNT(*) AS transaction_count
-            FROM transactions
-            GROUP BY code_departement
-        )
+        SELECT code_departement, COUNT(*) AS transaction_count,
+               ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2)
+                   AS transaction_share_pct
+        FROM operations
+        GROUP BY code_departement
         ORDER BY transaction_share_pct DESC, code_departement
     """
+
     return pd.read_sql_query(query, conn)
 
 
@@ -239,7 +235,7 @@ def rooms_vs_price(conn: sqlite3.Connection) -> pd.DataFrame:
             COUNT(*) AS transaction_count,
             ROUND(AVG(valeur_fonciere), 2) AS avg_price,
             ROUND(AVG(price_per_m2), 2) AS avg_price_per_m2
-        FROM transactions
+        FROM price_transactions
         WHERE type_local = 'Appartement'
           AND nombre_pieces_principales BETWEEN 1 AND 6
         GROUP BY nombre_pieces_principales
@@ -255,6 +251,9 @@ def anomaly_candidates(conn: sqlite3.Connection) -> pd.DataFrame:
     query = """
         WITH ranked AS (
             SELECT
+                source_row,
+                id_mutation,
+                numero_disposition,
                 code_departement,
                 type_local,
                 date_mutation,
@@ -271,7 +270,7 @@ def anomaly_candidates(conn: sqlite3.Connection) -> pd.DataFrame:
                 COUNT(*) OVER (
                     PARTITION BY code_departement, type_local
                 ) AS cnt
-            FROM transactions
+            FROM price_transactions
         ),
         thresholds AS (
             SELECT
@@ -283,6 +282,9 @@ def anomaly_candidates(conn: sqlite3.Connection) -> pd.DataFrame:
             GROUP BY code_departement, type_local
         )
         SELECT
+            t.source_row,
+            t.id_mutation,
+            t.numero_disposition,
             t.code_departement,
             t.type_local,
             t.date_mutation,
@@ -293,7 +295,7 @@ def anomaly_candidates(conn: sqlite3.Connection) -> pd.DataFrame:
             ROUND(th.p95_price_per_m2, 2) AS department_type_p95,
             t.longitude,
             t.latitude
-        FROM transactions AS t
+        FROM price_transactions AS t
         INNER JOIN thresholds AS th
             ON t.code_departement = th.code_departement
            AND t.type_local = th.type_local
@@ -314,7 +316,7 @@ def paris_inner_outer(conn: sqlite3.Connection) -> pd.DataFrame:
             nombre_pieces_principales,
             COUNT(*) AS transaction_count,
             ROUND(AVG(price_per_m2), 2) AS avg_price_per_m2
-        FROM transactions
+        FROM price_transactions
         WHERE code_departement = '75'
           AND nombre_pieces_principales IS NOT NULL
         GROUP BY type_local, nombre_pieces_principales

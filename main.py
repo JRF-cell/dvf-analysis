@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import platform
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
-from dvf.clean import clean_dataframe, load_raw_dataframe
+import pandas as pd
+
+from dvf.clean import OPERATION_KEY, clean_with_audit, load_raw_dataframe
 from dvf.database import load_to_sqlite
 from dvf.download import download_data
 from dvf.queries import (
@@ -22,7 +28,6 @@ from dvf.queries import (
     yoy_comparison,
 )
 from dvf.visualize import generate_all_figures
-
 
 DATA_URL = "https://files.data.gouv.fr/geo-dvf/latest/csv/2023/full.csv.gz"
 DATA_DIR = Path("data")
@@ -86,12 +91,86 @@ def run_load() -> sqlite3.Connection:
         )
 
     raw_df = load_raw_dataframe(CSV_PATH)
-    cleaned_df = clean_dataframe(raw_df)
-    connection = load_to_sqlite(cleaned_df, DB_PATH)
+    cleaned_df, audit = clean_with_audit(raw_df)
+    connection = load_to_sqlite(cleaned_df, DB_PATH, audit=audit)
+    try:
+        write_quality_report(cleaned_df, audit, connection)
+    except Exception:
+        connection.close()
+        raise
+    operation_count = connection.execute("SELECT COUNT(*) FROM operations").fetchone()[
+        0
+    ]
     print(
-        f"Loaded {len(cleaned_df):,} cleaned transactions into SQLite at {DB_PATH}."
+        f"Loaded {len(cleaned_df):,} residential source rows, "
+        f"{operation_count:,} distinct operations and "
+        f"{int(cleaned_df.price_eligible.sum()):,} eligible prices into {DB_PATH}."
     )
     return connection
+
+
+def write_quality_report(
+    rows: pd.DataFrame, audit: pd.DataFrame, connection: sqlite3.Connection
+) -> None:
+    """Publish aggregate checks and source fingerprint, without source addresses."""
+    digest = hashlib.sha256()
+    with CSV_PATH.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    candidates = rows[rows.candidate_price_per_m2.notna()]
+    bounds = (
+        candidates.groupby("type_local")
+        .agg(
+            candidates=("candidate_price_per_m2", "size"),
+            lower_bound=("price_lower_bound", "min"),
+            upper_bound=("price_upper_bound", "max"),
+        )
+        .reset_index()
+    )
+    report = {
+        "source": {
+            "url": DATA_URL,
+            "file": str(CSV_PATH),
+            "bytes": CSV_PATH.stat().st_size,
+            "sha256": digest.hexdigest(),
+        },
+        "runtime": {
+            "python": platform.python_version(),
+            "pandas": pd.__version__,
+            "sqlite": sqlite3.sqlite_version,
+        },
+        "raw_rows": len(audit),
+        "raw_operations_with_valid_keys": len(
+            audit.dropna(subset=OPERATION_KEY).drop_duplicates(OPERATION_KEY)
+        ),
+        "retained_rows": len(rows),
+        "volume_operations": int(monthly_volume(connection).transaction_count.sum()),
+        "price_candidates": len(candidates),
+        "price_eligible_operations": int(rows.price_eligible.sum()),
+        "volume_exclusions": audit.volume_exclusion_reason.replace("", "retained")
+        .value_counts()
+        .to_dict(),
+        "price_exclusions": audit.price_exclusion_reason.replace("", "eligible")
+        .value_counts()
+        .to_dict(),
+        "price_bounds_by_type": bounds.to_dict(orient="records"),
+        "monthly_volume": monthly_volume(connection).to_dict(orient="records"),
+        "price_distribution": price_distribution_by_type(connection).to_dict(
+            orient="records"
+        ),
+        "mean_price_per_m2": connection.execute(
+            "SELECT AVG(price_per_m2) FROM price_transactions"
+        ).fetchone()[0],
+        "sqlite_integrity": connection.execute("PRAGMA integrity_check").fetchone()[0],
+    }
+    destination = Path("outputs/quality_report.json")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_suffix(".json.part")
+    partial.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    partial.replace(destination)
 
 
 def run_queries() -> None:
@@ -115,7 +194,7 @@ def run_queries() -> None:
         "paris_inner_outer": paris_inner_outer,
     }
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         for name, function in query_functions.items():
             result = function(connection)
             print(f"\n=== {name} ===")
@@ -133,7 +212,7 @@ def run_visualizations() -> None:
             f"Missing SQLite database at {DB_PATH}. Run `python main.py --load` first."
         )
 
-    with sqlite3.connect(DB_PATH) as connection:
+    with closing(sqlite3.connect(DB_PATH)) as connection:
         generated = generate_all_figures(connection, "outputs/")
 
     for figure_path in generated:

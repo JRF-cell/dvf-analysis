@@ -37,14 +37,16 @@ def build_transactions_dataframe() -> pd.DataFrame:
         if index in {18, 42, 118, 141, 155}:
             price_multiplier = 1.35
 
-        value = (
-            (11_000 if department == "75" else 4_200)
-            * surface
-            * price_multiplier
-        )
+        value = (11_000 if department == "75" else 4_200) * surface * price_multiplier
 
         rows.append(
             {
+                "source_row": index + 1,
+                "id_mutation": f"TEST-{index:05d}",
+                "raw_mutation_rows": 1,
+                "raw_operation_rows": 1,
+                "price_eligible": True,
+                "numero_disposition": 1,
                 "date_mutation": f"2023-{(index % 12) + 1:02d}-{(index % 28) + 1:02d}",
                 "nature_mutation": "Vente",
                 "valeur_fonciere": round(value, 2),
@@ -82,6 +84,7 @@ def build_connection() -> sqlite3.Connection:
             price_distribution_by_type,
             [
                 "type_local",
+                "transaction_count",
                 "min_price_per_m2",
                 "max_price_per_m2",
                 "mean_price_per_m2",
@@ -122,6 +125,9 @@ def build_connection() -> sqlite3.Connection:
         (
             anomaly_candidates,
             [
+                "source_row",
+                "id_mutation",
+                "numero_disposition",
                 "code_departement",
                 "type_local",
                 "date_mutation",
@@ -159,3 +165,125 @@ def test_queries_return_non_empty_dataframes_with_expected_columns(
 
     assert not result.empty
     assert list(result.columns) == expected_columns
+
+
+def test_monthly_volume_counts_unique_sales() -> None:
+    """Une vente sur deux lignes ne compte qu'une fois."""
+
+    dataframe = build_transactions_dataframe()
+
+    # Dupliquer une ligne pour simuler une vente multiligne.
+    dataframe = pd.concat(
+        [dataframe, dataframe.iloc[[0]]],
+        ignore_index=True,
+    )
+
+    duplicated = dataframe.id_mutation.eq("TEST-00000")
+    dataframe.loc[duplicated, "raw_mutation_rows"] = 2
+    dataframe.loc[duplicated, "raw_operation_rows"] = 2
+    dataframe.loc[duplicated, "price_eligible"] = False
+    dataframe.loc[duplicated, "price_per_m2"] = None
+    conn = load_to_sqlite(dataframe, ":memory:")
+
+    try:
+        result = monthly_volume(conn)
+    finally:
+        conn.close()
+
+    # 161 lignes, mais seulement 160 ventes distinctes.
+    assert len(dataframe) == 161
+    assert result["transaction_count"].sum() == 160
+
+
+PRICE_QUERIES = [
+    avg_price_by_dept,
+    price_distribution_by_type,
+    top10_expensive_depts,
+    price_vs_surface_buckets,
+    yoy_comparison,
+    rooms_vs_price,
+    anomaly_candidates,
+    paris_inner_outer,
+]
+
+
+@pytest.mark.parametrize("query", PRICE_QUERIES)
+def test_every_price_query_excludes_unsafe_operations(query):
+    baseline = build_transactions_dataframe()
+    unsafe = baseline.iloc[[0]].copy()
+    unsafe["id_mutation"] = "UNSAFE"
+    unsafe["raw_mutation_rows"] = 2
+    unsafe["raw_operation_rows"] = 2
+    unsafe["price_eligible"] = False
+    unsafe["price_per_m2"] = 1e9
+    unsafe["valeur_fonciere"] = 1e12
+    expected_conn = load_to_sqlite(baseline, ":memory:")
+    actual_conn = load_to_sqlite(pd.concat([baseline, unsafe, unsafe]), ":memory:")
+    try:
+        pd.testing.assert_frame_equal(query(expected_conn), query(actual_conn))
+    finally:
+        expected_conn.close()
+        actual_conn.close()
+
+
+def test_department_share_counts_distinct_operations_and_multiple_dispositions():
+    from dvf.clean import clean_dataframe
+    from tests.test_clean import source_row
+
+    rows = clean_dataframe(
+        pd.DataFrame(
+            [
+                source_row("A"),
+                source_row("A", type_local="Dépendance"),
+                source_row("A", numero_disposition=2),
+                source_row("B", code_departement="75"),
+            ]
+        )
+    )
+    conn = load_to_sqlite(rows, ":memory:")
+    try:
+        shares = dept_transaction_share(conn).set_index("code_departement")
+        assert shares.loc["01", "transaction_count"] == 2
+        assert shares.loc["75", "transaction_count"] == 1
+        assert shares.loc["01", "transaction_share_pct"] == 66.67
+        assert monthly_volume(conn).transaction_count.sum() == 3
+    finally:
+        conn.close()
+
+
+def test_yoy_uses_years_when_multiple_years_are_present():
+    rows = build_transactions_dataframe()
+    second_year = rows.copy()
+    second_year["id_mutation"] += "-2024"
+    second_year["year"] = 2024
+    second_year["date_mutation"] = second_year.date_mutation.str.replace("2023", "2024")
+    conn = load_to_sqlite(pd.concat([rows, second_year]), ":memory:")
+    try:
+        result = yoy_comparison(conn)
+        assert "month" not in result
+        assert result.transaction_count.sum() == 320
+        assert result.year.tolist() == [2023, 2023, 2024, 2024]
+    finally:
+        conn.close()
+
+
+def test_sql_price_results_have_expected_values():
+    from dvf.clean import clean_dataframe
+    from tests.test_clean import source_row
+
+    rows = clean_dataframe(
+        pd.DataFrame(
+            [source_row(str(i), valeur_fonciere=200000) for i in range(100)]
+            + [source_row(str(i), valeur_fonciere=400000) for i in range(100, 200)]
+        )
+    )
+    conn = load_to_sqlite(rows, ":memory:")
+    try:
+        stats = price_distribution_by_type(conn).iloc[0]
+        assert stats.mean_price_per_m2 == 3000
+        assert stats.median_price_per_m2 == 3000
+        assert stats.stddev_price_per_m2 == 1002.51
+        assert avg_price_by_dept(conn).transaction_count.tolist() == [200]
+        assert top10_expensive_depts(conn).median_price_per_m2.tolist() == [3000]
+    finally:
+        conn.close()

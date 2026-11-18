@@ -9,5 +9,5 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - run: ruff check dvf/ tests/
+      - run: ruff check dvf/ tests/ main.py
       - run: pytest tests/ -v

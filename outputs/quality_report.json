@@ -1,0 +1,138 @@
+{
+  "source": {
+    "url": "https://files.data.gouv.fr/geo-dvf/latest/csv/2023/full.csv.gz",
+    "file": "data/full.csv",
+    "bytes": 662060415,
+    "sha256": "84407c24266819b4d12f88da1dbd3d67cd927d4b3991ecb7f0da501a21234c7e"
+  },
+  "runtime": {
+    "python": "3.14.6",
+    "pandas": "3.1.1",
+    "sqlite": "3.53.2"
+  },
+  "raw_rows": 3812327,
+  "raw_operations_with_valid_keys": 1369406,
+  "retained_rows": 1089679,
+  "volume_operations": 857775,
+  "price_candidates": 226880,
+  "price_eligible_operations": 222341,
+  "volume_exclusions": {
+    "non_residential": 2466003,
+    "retained": 1089679,
+    "not_sale": 251186,
+    "invalid_value": 4985,
+    "invalid_operation_nature": 266,
+    "invalid_surface": 208
+  },
+  "price_exclusions": {
+    "non_residential": 2466003,
+    "multiple_source_rows": 851497,
+    "not_sale": 251186,
+    "eligible": 222341,
+    "multiple_or_unknown_lots": 10906,
+    "invalid_value": 4985,
+    "price_outlier": 4539,
+    "invalid_rooms": 291,
+    "invalid_operation_nature": 266,
+    "invalid_surface": 208,
+    "multiple_dispositions": 105
+  },
+  "price_bounds_by_type": [
+    {
+      "type_local": "Appartement",
+      "candidates": 60070,
+      "lower_bound": 159.34736842105275,
+      "upper_bound": 14755.69462962961
+    },
+    {
+      "type_local": "Maison",
+      "candidates": 166810,
+      "lower_bound": 194.1747572815534,
+      "upper_bound": 9393.875473484852
+    }
+  ],
+  "monthly_volume": [
+    {
+      "year": 2023,
+      "month": 1,
+      "transaction_count": 68868
+    },
+    {
+      "year": 2023,
+      "month": 2,
+      "transaction_count": 66430
+    },
+    {
+      "year": 2023,
+      "month": 3,
+      "transaction_count": 78956
+    },
+    {
+      "year": 2023,
+      "month": 4,
+      "transaction_count": 63939
+    },
+    {
+      "year": 2023,
+      "month": 5,
+      "transaction_count": 70194
+    },
+    {
+      "year": 2023,
+      "month": 6,
+      "transaction_count": 87110
+    },
+    {
+      "year": 2023,
+      "month": 7,
+      "transaction_count": 85645
+    },
+    {
+      "year": 2023,
+      "month": 8,
+      "transaction_count": 60885
+    },
+    {
+      "year": 2023,
+      "month": 9,
+      "transaction_count": 76191
+    },
+    {
+      "year": 2023,
+      "month": 10,
+      "transaction_count": 69134
+    },
+    {
+      "year": 2023,
+      "month": 11,
+      "transaction_count": 57548
+    },
+    {
+      "year": 2023,
+      "month": 12,
+      "transaction_count": 72875
+    }
+  ],
+  "price_distribution": [
+    {
+      "type_local": "Appartement",
+      "transaction_count": 58868,
+      "min_price_per_m2": 160.0,
+      "max_price_per_m2": 14753.09,
+      "mean_price_per_m2": 4247.2,
+      "median_price_per_m2": 3500.0,
+      "stddev_price_per_m2": 2800.88
+    },
+    {
+      "type_local": "Maison",
+      "transaction_count": 163473,
+      "min_price_per_m2": 194.17,
+      "max_price_per_m2": 9393.23,
+      "mean_price_per_m2": 2590.23,
+      "median_price_per_m2": 2314.81,
+      "stddev_price_per_m2": 1487.03
+    }
+  ],
+  "mean_price_per_m2": 3028.9390126104236,
+  "sqlite_integrity": "ok"
+}
